@@ -154,20 +154,20 @@ pg_conftool() (
 			printf '%s\n' "$2" | grep -Eq "^(-?[0-9.]+|$id)\$" \
 				|| set -- "$1" "'$(printf '%s' "$2" | sed "s/'/''/g")'"
 			if grep -Eq "^[[:space:]]*$1$eq" "$configfile"; then
-				sed -Ei "" -f - "$configfile" <<-EOF_SED_SET
-					s/^[[:space:]]*$1$eq.*\$/# &\\
-					$1 = $2/
-				EOF_SED_SET
+				awk -f - -v s="$1 = $2" "$configfile" > "$configfile.lck" <<-EOF_AWK_SET
+					/^[[:space:]]*$1$eq/ { print "# " \$0; print s; }
+					{ print }
+				EOF_AWK_SET
 			elif grep -Eq "^[#[:space:]]+$1$eq" "$configfile"; then
-				awk -f - "$configfile" > "$configfile.lck" <<-EOF_AWK_SET_COMMENTED
-					/^[#[:space:]]+$1$eq/ { print \$0; if (!ok) print "$1 = $2"; ok=1; }
+				awk -f - -v s="$1 = $2" "$configfile" > "$configfile.lck" <<-EOF_AWK_SET_COMMENTED
+					/^[#[:space:]]+$1$eq/ { print \$0; if (!ok) print s; ok=1; }
 					{ print }
 				EOF_AWK_SET_COMMENTED
 				mv -f "$configfile.lck" "$configfile"
 			else
-				tee -a "$configfile" <<-EOF_SED_SET_APPEND
+				tee -a "$configfile" <<-EOF_TEE_SET_APPEND
 					$1 = $2
-				EOF_SED_SET_APPEND
+				EOF_TEE_SET_APPEND
 			fi ;;
 		remove)	[ $# = 1 ] || usage
 			sed -Ei "" "s/^[[:space:]]*$1$eq/# &/" "$configfile" ;;
