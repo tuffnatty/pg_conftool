@@ -1,0 +1,179 @@
+#!/bin/sh
+#-
+# Copyright (c) 2021 Phil Krylov
+#
+# Permission to use, copy, modify, and distribute this software and its
+# documentation for any purpose, without fee, and without a written agreement
+# is hereby granted, provided that the above copyright notice and this
+# paragraph and the following two paragraphs appear in all copies.
+#
+# IN NO EVENT SHALL Phil Krylov BE LIABLE TO ANY PARTY FOR DIRECT, INDIRECT,
+# SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, INCLUDING LOST PROFITS,
+# ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF Phil
+# Krylov HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+# Phil Krylov SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING, BUT NOT LIMITED
+# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+# PURPOSE. THE SOFTWARE PROVIDED HEREUNDER IS ON AN "AS IS" BASIS, AND Phil
+# Krylov HAS NO OBLIGATIONS TO PROVIDE MAINTENANCE, SUPPORT, UPDATES,
+# ENHANCEMENTS, OR MODIFICATIONS.
+
+
+# This is a limited implementation of Debian's pg_conftool in POSIX shell.
+# On FreeBSD, supports cluster specification by rc.conf postgresql profile name,
+# as well as operating within a jailed environment.
+# "include" and "include_dir" statements are not supported.
+
+set -e
+# shellcheck disable=3040
+set -o pipefail 2>/dev/null || true
+
+export uname root
+root=''
+uname=$(uname)
+
+abort() { printf '%s\n' "$1" >&2; exit 1; }
+ifelse() { _ie_1="$1"; _ie_2="$2"; shift 2; if "$@"; then printf %s "$_ie_1"; else printf %s "$_ie_2"; fi; }
+is_command() { case "$1" in show|set|remove|edit) ;; *) return 1 ;; esac; }
+
+detect_configfile_pgcommon() {
+	if is_command "$3"; then
+		dc_parsed=2
+		_dc_fname="postgresql.conf"
+	else
+		_dc_fname="$3"
+		dc_parsed=3
+	fi
+	configfile="/etc/postgresql/$1/$2/$_dc_fname"
+}
+
+pw() { if [ -z "$root" ]; then /usr/sbin/pw "$@"; else /usr/sbin/pw -R "$root" "$@"; fi; }
+sysrc() { if [ -z "$root" ]; then /usr/sbin/sysrc "$@"; else /usr/sbin/sysrc -R "$root" "$@"; fi; }
+
+detect_configfile_FreeBSD() {
+	export dc_parsed=0
+	_dcf_profiles="$(sysrc -n postgresql_profiles)"
+	case " $_dcf_profiles " in
+		*" $1_$2 "*)	_dcf_profile="$1_$2"; dc_parsed=2 ;;
+		*" $1 "*)	_dcf_profile="$1"; dc_parsed=1 ;;
+	esac
+	if [ -z "$_dcf_profile" ]; then
+		_dcf_pgdata="$(sysrc -qn postgresql_data || true)"
+		if [ -z "$_dcf_pgdata" ]; then
+			_dcf_pguser="$(sysrc -qn postgresql_user || printf postgres)"
+			_dcf_pgdata="$(find "$root$(pw usershow "$_dcf_pguser" | cut -f 9 -d :)" -maxdepth 1 -name "data*" -type d | sort -rV | head -1)"
+			_dcf_pgdata="${_dcf_pgdata#$root}"
+		fi
+	else
+		_dcf_pgdata="$(sysrc -qn postgresql_"$_dcf_profile"_data)" || abort "postgresql_${_dcf_profile}_data is not set in rc.conf"
+	fi
+	shift $dc_parsed
+	if [ -n "$_dcf_pgdata" ]; then
+		if is_command "$1"; then
+			configfile="$_dcf_pgdata/postgresql.conf"
+		else
+			configfile="$_dcf_pgdata/$1"
+			: $(( dc_parsed += 1 ))
+		fi
+	elif is_command "$1"; then
+		abort "Could not detect configfile."
+	else
+		configfile="$1"
+		: $(( dc_parsed += 1 ))
+	fi
+}
+
+detect_configfile() {
+	if [ -r "$root$1" ]; then
+		configfile="$1"
+		dc_parsed=1
+		return 0
+	fi
+	case "$uname" in
+		FreeBSD)	detect_configfile_$uname "$@" ;;
+		*)		detect_configfile_pgcommon "$@" ;;
+	esac
+}
+
+usage() {
+	cat <<-EOF_PG_CONFTOOL_HELP
+		usage:
+		pg_conftool [-bsvh] [-j JAIL | -R DIR] [VERSION CLUSTERNAME | PROFILE] CONFIGFILE COMMAND
+		-b	Format boolean value as on or off (not for "show all").
+		-j JAIL	The jid or name of the jail to operate within (on FreeBSD).
+		-s	Show only the value (not for "show all").
+		-v	Verbose output (inform if parameter is not found).
+		-R DIR	The root directory to operate within.
+		-h	Print help.
+		show PARAMETER|all	Show a parameter, or all present in CONFIGFILE.
+		set PARAMETER VALUE	Set or update a parameter.
+		remove PARAMETER	Remove (comment out) a parameter from CONFIGFILE.
+		edit			Open the config file in \$EDITOR [vi].
+	EOF_PG_CONFTOOL_HELP
+	exit 1
+}
+
+pg_conftool() (
+	sed_boolean=''
+	sed_short=''
+	verbose=false
+	eq='[[:space:]]*[=[:space:]][[:space:]]*'
+	cmt='[[:space:]]*(#.*)?'
+	id='[_A-Za-z0-9]+'
+	while getopts :bj:svhR: opt; do case $opt in
+		b)	sed_boolean="s,^([[:space:]]*$id$eq)(1|on|t(r(ue?)?)?|y(es?)?)($cmt)\$,\\1on\\6,i
+				     s,^([[:space:]]*$id$eq)(0|off?|f(a(l(se?)?)?)?|no?)($cmt)\$,\\1off\\6,i" ;;
+		j)	root="$(jls -j "$OPTARG" path)" ;;
+		s)	sed_short="s,^[[:space:]]*$id$eq,,
+			           s,$cmt\$,,
+				   s,^'(.*)'\$,\\1,
+				   s,'',',g" ;;
+		v)	verbose=true ;;
+		R)	root="$OPTARG" ;;
+		*)	usage ;;
+	esac; done
+	shift $((OPTIND - 1))
+	[ -n "$1" ] || usage
+	detect_configfile "$@"
+	configfile="$root$configfile"
+	shift "$dc_parsed"
+	[ -r "$configfile" ] || abort "$configfile is not readable"
+	[ -n "$1" ] || usage
+	cmd="$1"; shift
+	case "$cmd" in
+		show)	[ $# = 1 ] || usage
+			[ "$1" != "all" ] || { set -- "$id"; sed_boolean=''; sed_short=''; }
+			grep -E "^[[:space:]]*$1$eq" "$configfile" \
+				| sed -E "$sed_boolean
+					  $sed_short" \
+				|| { $verbose && abort "# $1 not found in $configfile"; exit 1; }
+			;;
+		set)	[ $# = 2 ] || usage
+			[ "$(pg_conftool -s "$configfile" show "$1")" != "$2" ] && exit 0
+			printf '%s\n' "$2" | grep -Eq "^(-?[0-9.]+|$id)\$" \
+				|| set -- "$1" "'$(printf '%s' "$2" | sed "s/'/''/g")'"
+			if grep -Eq "^[[:space:]]*$1$eq" "$configfile"; then
+				sed -Ei "" -f - "$configfile" <<-EOF_SED_SET
+					s/^[[:space:]]*$1$eq.*\$/# &\\
+					$1 = $2/
+				EOF_SED_SET
+			elif grep -Eq "^[#[:space:]]+$1$eq" "$configfile"; then
+				awk -f - "$configfile" > "$configfile.lck" <<-EOF_AWK_SET_COMMENTED
+					/^[#[:space:]]+$1$eq/ { print \$0; if (!ok) print "$1 = $2"; ok=1; }
+					{ print }
+				EOF_AWK_SET_COMMENTED
+				mv -f "$configfile.lck" "$configfile"
+			else
+				tee -a "$configfile" <<-EOF_SED_SET_APPEND
+					$1 = $2
+				EOF_SED_SET_APPEND
+			fi ;;
+		remove)	[ $# = 1 ] || usage
+			sed -Ei "" "s/^[[:space:]]*$1$eq/# &/" "$configfile" ;;
+		edit)	[ $# = 0 ] || usage
+			${EDITOR:-vi} "$configfile" ;;
+		*)	usage ;;
+	esac
+)
+
+pg_conftool "$@"
