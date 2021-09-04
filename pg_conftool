@@ -28,11 +28,10 @@ set -e
 # shellcheck disable=3040
 set -o pipefail 2>/dev/null || true
 
-export uname root
-root=''
+export uname
 uname=$(uname)
 
-abort() { printf '%s\n' "$1" >&2; exit 1; }
+abort() { printf '%s\n' "$2" >&2; exit "$1"; }
 ifelse() { _ie_1="$1"; _ie_2="$2"; shift 2; if "$@"; then printf %s "$_ie_1"; else printf %s "$_ie_2"; fi; }
 is_command() { case "$1" in show|set|remove|edit) ;; *) return 1 ;; esac; }
 
@@ -65,7 +64,7 @@ detect_configfile_FreeBSD() {
 			_dcf_pgdata="${_dcf_pgdata#$root}"
 		fi
 	else
-		_dcf_pgdata="$(sysrc -qn postgresql_"$_dcf_profile"_data)" || abort "postgresql_${_dcf_profile}_data is not set in rc.conf"
+		_dcf_pgdata="$(sysrc -qn postgresql_"$_dcf_profile"_data)" || abort 2 "postgresql_${_dcf_profile}_data is not set in rc.conf"
 	fi
 	shift $dc_parsed
 	if [ -n "$_dcf_pgdata" ]; then
@@ -76,7 +75,7 @@ detect_configfile_FreeBSD() {
 			: $(( dc_parsed += 1 ))
 		fi
 	elif is_command "$1"; then
-		abort "Could not detect configfile."
+		abort 2 "Could not detect configfile."
 	else
 		configfile="$1"
 		: $(( dc_parsed += 1 ))
@@ -110,13 +109,14 @@ usage() {
 		remove PARAMETER	Remove (comment out) a parameter from CONFIGFILE.
 		edit			Open the config file in \$EDITOR [vi].
 	EOF_PG_CONFTOOL_HELP
-	exit 1
+	exit 3
 }
 
 pg_conftool() (
 	sed_boolean=''
 	sed_short=''
 	verbose=false
+	root=''
 	eq='[[:space:]]*[=[:space:]][[:space:]]*'
 	cmt='[[:space:]]*(#.*)?'
 	id='[_A-Za-z0-9]+'
@@ -137,7 +137,7 @@ pg_conftool() (
 	detect_configfile "$@"
 	configfile="$root$configfile"
 	shift "$dc_parsed"
-	[ -r "$configfile" ] || abort "$configfile is not readable"
+	[ -r "$configfile" ] || abort 2 "$configfile is not readable"
 	[ -n "$1" ] || usage
 	cmd="$1"; shift
 	case "$cmd" in
@@ -146,10 +146,11 @@ pg_conftool() (
 			grep -E "^[[:space:]]*$1$eq" "$configfile" \
 				| sed -E "$sed_boolean
 					  $sed_short" \
-				|| { $verbose && abort "# $1 not found in $configfile"; exit 1; }
+				|| { $verbose && abort 1 "# $1 not found in $configfile"; exit 1; }
 			;;
 		set)	[ $# = 2 ] || usage
-			[ "$(pg_conftool -s "$configfile" show "$1")" != "$2" ] && exit 0
+			old_value="$(pg_conftool -s "$configfile" show "$1")" || case $? in 2|3) exit $? ;; esac
+			[ "$old_value" != "$2" ] || exit 0
 			printf '%s\n' "$2" | grep -Eq "^(-?[0-9.]+|$id)\$" \
 				|| set -- "$1" "'$(printf '%s' "$2" | sed "s/'/''/g")'"
 			if grep -Eq "^[[:space:]]*$1$eq" "$configfile"; then
