@@ -5,7 +5,7 @@ This is a limited implementation of Debian's `pg_conftool`.
 ## Why
 
 The original `pg_conftool` requires Perl and a distribution using `postgresql-common`.
-This `pg_conftool` requires only POSIX shell and works in FreeBSD.
+This `pg_conftool` requires only POSIX shell, supports setting multiple parameters at once, and works in FreeBSD.
 
 ## Usage
 
@@ -25,7 +25,8 @@ PROFILE is used to specify cluster in FreeBSD, it must be contained in the
 CONFIGFILE may specify an absolute pathname; cluster specification is not needed then.
 
 show PARAMETER|all      Show a parameter, or all present in CONFIGFILE.
-set PARAMETER VALUE     Set or update a parameter.
+set [PARAMETER VALUE | PARAMETER=VALUE]...
+			Set or update a parameter, or multiple parameters.
 remove PARAMETER        Remove (comment out) a parameter from CONFIGFILE.
 edit                    Open the config file in $EDITOR [vi].
 ```

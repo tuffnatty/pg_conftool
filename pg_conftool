@@ -59,8 +59,8 @@ detect_configfile_FreeBSD() {
 	if [ -z "$_dcf_profile" ]; then
 		_dcf_pgdata="$(sysrc -qn postgresql_data || true)"
 		if [ -z "$_dcf_pgdata" ]; then
-			_dcf_pguser="$(sysrc -qn postgresql_user || printf postgres)"
-			_dcf_pgdata="$(find "$root$(pw usershow "$_dcf_pguser" | cut -f 9 -d :)" -maxdepth 1 -name "data*" -type d | sort -rV | head -1)"
+			_dcf_pghome="$(pw usershow "$(sysrc -qn postgresql_user || printf postgres)" | cut -f 9 -d :)"
+			_dcf_pgdata="$(find "$root$_dcf_pghome" -maxdepth 1 -name "data*" -type d | sort -rV | head -1)"
 			_dcf_pgdata="${_dcf_pgdata#$root}"
 		fi
 	else
@@ -89,7 +89,7 @@ detect_configfile() {
 		return 0
 	fi
 	case "$uname" in
-		FreeBSD)	detect_configfile_$uname "$@" ;;
+		FreeBSD)	detect_configfile_"$uname" "$@" ;;
 		*)		detect_configfile_pgcommon "$@" ;;
 	esac
 }
@@ -105,11 +105,34 @@ usage() {
 		-R DIR	The root directory to operate within.
 		-h	Print help.
 		show PARAMETER|all	Show a parameter, or all present in CONFIGFILE.
-		set PARAMETER VALUE	Set or update a parameter.
+		set [PARAMETER VALUE | PARAMETER=VALUE]...
+					Set or update a parameter or multiple parameters.
 		remove PARAMETER	Remove (comment out) a parameter from CONFIGFILE.
 		edit			Open the config file in \$EDITOR [vi].
 	EOF_PG_CONFTOOL_HELP
 	exit 3
+}
+
+pg_conf_quote() {
+	printf '%s' "$1" | grep -E "^(-?[0-9.]+|$id)\$" \
+		|| printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+awk_quote() {
+	case "$1" in
+		*\"*)	printf '"%s"' "$(printf '%s' "$1" | sed 's/"/\\"/g')" ;;
+		*)	printf '"%s"' "$1" ;;
+	esac
+}
+
+make_awk_arr() {
+	_maa_name="$1"; shift
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			*"="*)	printf '%s["%s"] = %s;\n' "$_maa_name" "${1%%=*}" "$(awk_quote "$(pg_conf_quote "${1#*=}")")"; shift ;;
+			*)	printf '%s["%s"] = %s;\n' "$_maa_name" "$1" "$(awk_quote "$(pg_conf_quote "$2")")"; shift 2 ;;
+		esac
+	done
 }
 
 pg_conftool() (
@@ -148,27 +171,49 @@ pg_conftool() (
 					  $sed_short" \
 				|| { $verbose && abort 1 "# $1 not found in $configfile"; exit 1; }
 			;;
-		set)	[ $# = 2 ] || usage
-			old_value="$(pg_conftool -s "$configfile" show "$1")" || case $? in 2|3) exit $? ;; esac
-			[ "$old_value" != "$2" ] || exit 0
-			printf '%s\n' "$2" | grep -Eq "^(-?[0-9.]+|$id)\$" \
-				|| set -- "$1" "'$(printf '%s' "$2" | sed "s/'/''/g")'"
-			if grep -Eq "^[[:space:]]*$1$eq" "$configfile"; then
-				awk -f - -v s="$1 = $2" "$configfile" > "$configfile.lck" <<-EOF_AWK_SET
-					/^[[:space:]]*$1$eq/ { print "# " \$0; print s; }
-					{ print }
-				EOF_AWK_SET
-			elif grep -Eq "^[#[:space:]]+$1$eq" "$configfile"; then
-				awk -f - -v s="$1 = $2" "$configfile" > "$configfile.lck" <<-EOF_AWK_SET_COMMENTED
-					/^[#[:space:]]+$1$eq/ { print \$0; if (!ok) print s; ok=1; }
-					{ print }
-				EOF_AWK_SET_COMMENTED
-				mv -f "$configfile.lck" "$configfile"
-			else
-				tee -a "$configfile" <<-EOF_TEE_SET_APPEND
-					$1 = $2
-				EOF_TEE_SET_APPEND
-			fi ;;
+		set)	awk -f - "$configfile" > "$configfile.lck" <<-EOF_AWK_SET
+				BEGIN {
+				  n = 0;
+				  $(make_awk_arr values "$@")
+				}
+				{
+				  lines[n++] = \$0;
+				}
+				/^[[:space:]]*$id$eq/ {
+				  sub(/^[[:space:]]*/, "");
+				  sub(/[=[:space:]]+/, SUBSEP); split(\$0, a, SUBSEP);
+				  if (a[1] in values) {
+				    lines[n - 1] = "# " lines[n - 1];
+				    lines[n++] = a[1] " = " values[a[1]];
+				    delete values[a[1]];
+				  }
+				  delete a;
+				}
+				/^[[:space:]]*#[[:space:]]*$id$eq/ {
+				  sub(/^[[:space:]]*#[[:space:]]*/, "");
+				  sub(/[=[:space:]]+/, SUBSEP); split(\$0, a, SUBSEP);
+				  if (a[1] in values) {
+				    last_commented[a[1]] = n - 1;
+				  }
+				  delete a;
+				}
+				END {
+				  for (k in values) {
+				    if (k in last_commented) {
+				      lines[last_commented[k]] = lines[last_commented[k]] "\\n" k " = " values[k];
+				      delete values[k]
+				    }
+				  }
+				  for (i=0; i<n; i++) {
+				    print lines[i];
+				  }
+				  for (k in values) {
+				    print k " = " values[k];
+				  }
+				}
+			EOF_AWK_SET
+			diff -q "$configfile" "$configfile.lck" 2>/dev/null || mv -f "$configfile.lck" "$configfile"
+			;;
 		remove)	[ $# = 1 ] || usage
 			sed -Ei "" "s/^[[:space:]]*$1$eq/# &/" "$configfile" ;;
 		edit)	[ $# = 0 ] || usage
